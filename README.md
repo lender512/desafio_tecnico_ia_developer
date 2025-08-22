@@ -262,16 +262,16 @@ graph LR
     
     subgraph "Customer Management"
         B[GET /api/v1/customers]
-        C[GET /api/v1/customers/{id}/profile]
-        D[GET /api/v1/customers/{id}/summary]
+        C[GET /api/v1/customers/id/profile]
+        D[GET /api/v1/customers/id/summary]
     end
     
     subgraph "Financial Data"
-        E[GET /api/v1/loans/{customer_id}]
-        F[GET /api/v1/cards/{customer_id}]
-        G[GET /api/v1/payments/{customer_id}]
-        H[GET /api/v1/cashflows/{customer_id}]
-        I[GET /api/v1/credit-scores/{customer_id}]
+        E[GET /api/v1/loans/customer_id]
+        F[GET /api/v1/cards/customer_id]
+        G[GET /api/v1/payments/customer_id]
+        H[GET /api/v1/cashflows/customer_id]
+        I[GET /api/v1/credit-scores/customer_id]
     end
     
     subgraph "AI Analysis"
@@ -281,7 +281,7 @@ graph LR
     
     subgraph "Report Generation"
         L[POST /api/v1/reports/generate-report]
-        M[GET /api/v1/reports/{report_id}]
+        M[GET /api/v1/reports/report_id]
     end
 ```
 
