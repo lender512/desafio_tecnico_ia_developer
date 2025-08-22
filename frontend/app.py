@@ -27,15 +27,6 @@ def render_header():
     st.markdown("---")
 
 
-def check_backend_health():
-    """Check backend API health and display status"""
-    if not check_api_health():
-        show_error_message("Backend API is not available. Please ensure the backend is running on http://localhost:8000")
-        st.stop()
-    
-    show_success_message("Backend API is healthy")
-
-
 def render_sidebar():
     """Render sidebar navigation and customer selection"""
     st.sidebar.title("Navigation")
@@ -107,9 +98,6 @@ def main():
     
     # Header
     render_header()
-    
-    # Backend health check
-    check_backend_health()
     
     # Sidebar navigation
     selected_customer, selected_page = render_sidebar()
