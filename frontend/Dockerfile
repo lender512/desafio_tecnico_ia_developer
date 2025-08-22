@@ -17,9 +17,6 @@ COPY app.py ./
 COPY src/ ./src/
 COPY assets/ ./assets/
 
-# Copy environment variables
-COPY .env ./
-
 # Create non-root user
 RUN useradd --create-home --shell /bin/bash app && \
     chown -R app:app /app

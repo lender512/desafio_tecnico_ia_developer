@@ -30,8 +30,8 @@ def create_consolidation_offer_form(num_offers: int) -> List[Dict]:
             conditions = st.text_input(f"Conditions", value="Good credit required", key=f"conditions_{i}")
             product_types = st.multiselect(
                 f"Eligible Products", 
-                ["personal", "credit_card", "auto", "mortgage"],
-                default=["personal", "credit_card"],
+                ["personal", "micro", "loan", "card"],
+                default=["personal", "card"],
                 key=f"products_{i}"
             )
         

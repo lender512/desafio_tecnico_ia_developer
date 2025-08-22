@@ -1,7 +1,18 @@
 FROM python:3.11-slim
 
-# Install curl for health checks
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+# Install dependencies for PDF generation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 \
+    libgobject-2.0-0 \
+    libcairo2 \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libharfbuzz0b \
+    libfreetype6 \
+    fontconfig \
+    libgdk-pixbuf-2.0-0 \
+    fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/*
 
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
@@ -17,9 +28,6 @@ RUN uv sync --frozen --no-cache
 
 # Copy application code
 COPY app/ ./app/
-
-# Copy environment variables
-COPY .env ./
 
 # Create non-root user
 RUN useradd --create-home --shell /bin/bash app && \

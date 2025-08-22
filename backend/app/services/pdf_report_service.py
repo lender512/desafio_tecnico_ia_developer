@@ -1,436 +1,197 @@
 """
-PDF Report Generation Service using LangChain agents
+Refactored PDF Report Service using LangGraph workflow.
+This service coordinates the generation of comprehensive PDF financial reports.
 """
-import io
-from typing import Dict, Any, Optional
+
+import logging
+from typing import Optional
 from datetime import datetime
-
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
-
-from langchain.agents import AgentType, initialize_agent, Tool
-from langchain.llms.base import LLM
-from langchain.memory import ConversationBufferMemory
-from langchain.callbacks.manager import CallbackManagerForLLMRun
-from langchain_azure_ai.chat_models import AzureAIChatCompletionsModel
-from pydantic import ConfigDict
+from langgraph.graph import StateGraph, END
 
 from ..schemas.analysis import DebtAnalysisResult
-from ..core.config import settings
-
-
-class ReportAnalysisLLM(LLM):
-    """Custom LLM wrapper for Azure AI that focuses on financial analysis reporting."""
-
-    # Allow non-Pydantic types
-    model_config = ConfigDict(arbitrary_types_allowed=True, protected_namespaces=())
-
-    azure_ai_client: Optional[AzureAIChatCompletionsModel] = None
-
-    def __init__(self, azure_ai_client: Optional[AzureAIChatCompletionsModel] = None, **kwargs: Any):
-        client = azure_ai_client or AzureAIChatCompletionsModel(
-            endpoint=settings.AZURE_INFERENCE_ENDPOINT,
-            credential=settings.AZURE_INFERENCE_CREDENTIAL,
-            model=settings.AZURE_INFERENCE_MODEL,
-        )
-        object.__setattr__(self, "azure_ai_client", client)
-        super().__init__(**kwargs)
-
-    @property
-    def _llm_type(self) -> str:
-        return "azure_ai_financial_analysis"
-
-    @property
-    def _identifying_params(self) -> Dict[str, Any]:
-        # Helps LangChain cache
-        return {
-            "endpoint": getattr(self.azure_ai_client, "endpoint", None),
-            "model": getattr(self.azure_ai_client, "model", None),
-            "_type": self._llm_type,
-        }
-
-    def _call(
-        self,
-        prompt: str,
-        stop: Optional[list] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
-        **kwargs: Any,
-    ) -> str:
-        """Call Azure AI to generate financial analysis text."""
-        try:
-            response = self.azure_ai_client.invoke(prompt)
-            text = getattr(response, "content", None)
-            text = text if isinstance(text, str) and text.strip() else str(response)
-            # Respect stop tokens client-side if needed
-            if stop and text:
-                for s in stop:
-                    idx = text.find(s)
-                    if idx != -1:
-                        text = text[:idx]
-                        break
-            return text
-        except Exception as e:
-            return f"Error generating analysis: {e}"
+from ..schemas.pdf_report import ReportState, MarkdownDoc
+from ..core.llm_utils import (
+    get_llm, 
+    generate_analysis_prompt, 
+    generate_markdown_formatting_prompt,
+    generate_html_conversion_prompt,
+    invoke_llm_for_analysis,
+    invoke_llm_for_markdown,
+    invoke_llm_for_html
+)
+from ..core.html_utils import (
+    strip_code_fences,
+    remove_html_wrappers,
+    ensure_table_sections,
+    extract_html_body_fragment,
+    markdown_to_html_fallback,
+    validate_html_fragment
+)
+from ..core.report_styles import create_styled_html_document
+from ..core.report_utils import (
+    prepare_analysis_context,
+    generate_fallback_analysis,
+    generate_fallback_markdown,
+    assemble_markdown_from_structured_response
+)
+from ..core.pdf_utils import html_to_pdf, simple_html_to_pdf, save_pdf_to_file
 
 
 class PDFReportService:
-    """Service for generating comprehensive PDF reports using LangChain agents."""
+    """Service for generating comprehensive PDF reports using LangGraph."""
 
-    def __init__(self, llm: Optional[ReportAnalysisLLM] = None):
-        self.llm = llm or ReportAnalysisLLM()
-        self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-        self._setup_agent()
+    def __init__(self, llm=None):
+        self.llm = llm or get_llm()
+        self.graph = self._build_graph()
 
-    def _setup_agent(self):
-        """Setup LangChain agent with financial analysis tools."""
-        tools = [
-            Tool(
-                name="debt_summary_analyzer",
-                description="Analyzes debt summary data and creates natural language descriptions of customer's financial situation",
-                func=self._analyze_debt_summary,
-            ),
-            Tool(
-                name="payment_strategy_analyzer",
-                description="Analyzes payment strategies and provides insights on minimum vs optimized payment approaches",
-                func=self._analyze_payment_strategies,
-            ),
-            Tool(
-                name="consolidation_analyzer",
-                description="Analyzes consolidation options and provides recommendations on debt consolidation benefits",
-                func=self._analyze_consolidation_options,
-            ),
-            Tool(
-                name="savings_calculator",
-                description="Calculates and explains potential savings from different financial strategies",
-                func=self._calculate_savings_analysis,
-            ),
-            Tool(
-                name="recommendation_generator",
-                description="Generates personalized financial recommendations based on the analysis results",
-                func=self._generate_recommendations,
-            ),
-        ]
+    def _build_graph(self) -> StateGraph:
+        """Build the LangGraph workflow for PDF report generation."""
+        workflow = StateGraph(ReportState)
+        
+        # Add nodes
+        workflow.add_node("generate_text", self._generate_analysis_text)
+        workflow.add_node("format_markdown", self._format_to_markdown)
+        workflow.add_node("convert_to_pdf", self._convert_to_styled_html_and_pdf)
+        
+        # Add edges
+        workflow.set_entry_point("generate_text")
+        workflow.add_edge("generate_text", "format_markdown")
+        workflow.add_edge("format_markdown", "convert_to_pdf")
+        workflow.add_edge("convert_to_pdf", END)
+        
+        return workflow.compile()
 
-        self.agent = initialize_agent(
-            tools=tools,
-            llm=self.llm,
-            agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-            memory=self.memory,
-            verbose=False,
-            max_iterations=5,
-        )
-
-    def _analyze_debt_summary(self, analysis_data: str) -> str:
-        prompt = f"""
-You are a financial analyst. Provide a clear summary of the customer's debt situation:
-
-DATA:
-{analysis_data}
-
-Focus on:
-- Current debt portfolio overview
-- Credit score assessment
-- Key financial health indicators
-- Risks and positives
-
-Write in a professional, accessible tone.
-"""
-        return self.llm._call(prompt)
-
-    def _analyze_payment_strategies(self, strategy_data: str) -> str:
-        prompt = f"""
-You are a financial advisor. Analyze these payment strategies:
-
-DATA:
-{strategy_data}
-
-Explain:
-- How minimum payments behave long-term
-- Benefits of the optimized strategy
-- Time and interest savings
-- Why the optimized approach is more effective
-
-Use educational, customer-friendly language.
-"""
-        return self.llm._call(prompt)
-
-    def _analyze_consolidation_options(self, consolidation_data: str) -> str:
-        prompt = f"""
-You are a debt consolidation specialist. Analyze this consolidation option:
-
-DATA:
-{consolidation_data}
-
-Cover:
-- How consolidation works
-- Specific benefits for this customer
-- Rate improvements & payment simplification
-- Overall financial impact and considerations
-"""
-        return self.llm._call(prompt)
-
-    def _calculate_savings_analysis(self, savings_data: str) -> str:
-        prompt = f"""
-You are a financial calculator expert. Break down the savings clearly:
-
-DATA:
-{savings_data}
-
-Provide:
-- Interest savings
-- Time savings (months/years)
-- Total financial benefit
-- Practical implications and future impact
-"""
-        return self.llm._call(prompt)
-
-    def _generate_recommendations(self, full_analysis: str) -> str:
-        prompt = f"""
-You are a personal financial advisor. Provide specific, actionable recommendations:
-
-FULL CONTEXT:
-{full_analysis}
-
-Include:
-- Primary recommended action
-- Step-by-step implementation plan
-- Timeline & milestones
-- Additional financial health tips
-"""
-        return self.llm._call(prompt)
-
-    def _prepare_analysis_context(self, analysis: DebtAnalysisResult) -> Dict[str, str]:
-        context = {
-            "debt_summary": f"""
-Customer ID: {analysis.customer_id}
-Current Credit Score: {analysis.current_credit_score}
-Minimum Payment Strategy: {analysis.minimum_payment_strategy.months} months, ${analysis.minimum_payment_strategy.total_interest:,.2f} total interest
-Optimized Payment Strategy: {analysis.optimized_payment_strategy.months} months, ${analysis.optimized_payment_strategy.total_interest:,.2f} total interest
-Savings vs Minimum: ${analysis.savings_vs_minimum.interest_saved:,.2f} interest saved, {analysis.savings_vs_minimum.months_saved} months saved
-""",
-            "payment_strategies": f"""
-Minimum Payment:
-- Duration: {analysis.minimum_payment_strategy.months} months
-- Total Interest: ${analysis.minimum_payment_strategy.total_interest:,.2f}
-
-Optimized Payment:
-- Duration: {analysis.optimized_payment_strategy.months} months
-- Total Interest: ${analysis.optimized_payment_strategy.total_interest:,.2f}
-
-Comparison:
-- Interest Saved: ${analysis.savings_vs_minimum.interest_saved:,.2f}
-- Time Saved: {analysis.savings_vs_minimum.months_saved} months
-""",
-            "consolidation": "",
-            "savings": f"""
-Optimized vs Minimum Payment:
-- Interest Savings: ${analysis.savings_vs_minimum.interest_saved:,.2f}
-- Time Savings: {analysis.savings_vs_minimum.months_saved} months
-""",
-        }
-
-        if getattr(analysis, "consolidation_option", None):
-            context["consolidation"] = f"""
-Consolidation Option:
-- Offer ID: {analysis.consolidation_option.offer_id}
-- New Interest Rate: {analysis.consolidation_option.new_rate_pct}%
-- Duration: {analysis.consolidation_option.months} months
-- Total Interest: ${analysis.consolidation_option.total_interest:,.2f}
-- Consolidated Amount: ${analysis.consolidation_option.consolidated_amount:,.2f}
-
-Consolidation vs Minimum:
-- Interest Saved: ${analysis.consolidation_savings.vs_minimum.interest_saved:,.2f}
-- Time Saved: {analysis.consolidation_savings.vs_minimum.months_saved} months
-
-Consolidation vs Optimized:
-- Interest Saved: ${analysis.consolidation_savings.vs_optimized.interest_saved:,.2f}
-- Time Saved: {analysis.consolidation_savings.vs_optimized.months_saved} months
-"""
-        else:
-            context["consolidation"] = getattr(analysis, "consolidation_message", "No consolidation options available")
-
-        if getattr(analysis, "consolidation_savings", None):
-            context["savings"] += f"""
-
-Consolidation Savings:
-vs Minimum:
-- Interest Saved: ${analysis.consolidation_savings.vs_minimum.interest_saved:,.2f}
-- Time Saved: {analysis.consolidation_savings.vs_minimum.months_saved} months
-
-vs Optimized:
-- Interest Saved: ${analysis.consolidation_savings.vs_optimized.interest_saved:,.2f}
-- Time Saved: {analysis.consolidation_savings.vs_optimized.months_saved} months
-"""
-        return context
-
-    def _generate_report_content(self, analysis: DebtAnalysisResult) -> Dict[str, str]:
-        context = self._prepare_analysis_context(analysis)
-        sections: Dict[str, str] = {}
+    def _generate_analysis_text(self, state: ReportState) -> ReportState:
+        """Node 1: Generate comprehensive text analysis from the debt analysis data."""
+        analysis = state["analysis_data"]
+        
+        # Prepare the analysis context
+        context = prepare_analysis_context(analysis)
+        
+        # Generate the prompt and invoke LLM
+        prompt = generate_analysis_prompt(analysis, context)
+        
         try:
-            sections["executive_summary"] = self.agent.run(
-                f"Create an executive summary based on: {context['debt_summary']}"
-            )
-            sections["payment_analysis"] = self.agent.run(
-                f"Analyze the payment strategies: {context['payment_strategies']}"
-            )
-            if getattr(analysis, "consolidation_option", None):
-                sections["consolidation_analysis"] = self.agent.run(
-                    f"Analyze the consolidation option: {context['consolidation']}"
-                )
+            raw_analysis = invoke_llm_for_analysis(self.llm, prompt)
+        except Exception as e:
+            logging.error(f"LLM analysis generation failed: {e}")
+            raw_analysis = generate_fallback_analysis(analysis)
+
+        state["raw_analysis"] = raw_analysis
+        return state
+
+    def _format_to_markdown(self, state: ReportState) -> ReportState:
+        """Node 2: Format the analysis text into structured markdown for PDF conversion."""
+        raw_analysis = state["raw_analysis"]
+        analysis = state["analysis_data"]
+
+        prompt = generate_markdown_formatting_prompt(raw_analysis, analysis)
+
+        try:
+            resp: MarkdownDoc = invoke_llm_for_markdown(self.llm, prompt)
+
+            # Prefer the model's full 'markdown' if present; otherwise assemble from sections.
+            if resp.markdown and resp.markdown.strip():
+                markdown_content = resp.markdown.strip()
             else:
-                sections["consolidation_analysis"] = "No consolidation options are currently available for this customer."
-            sections["savings_analysis"] = self.agent.run(
-                f"Explain the savings potential: {context['savings']}"
-            )
+                markdown_content = assemble_markdown_from_structured_response(resp)
 
-            full_context = f"""
-Summary: {context['debt_summary']}
-Strategies: {context['payment_strategies']}
-Consolidation: {context['consolidation']}
-Savings: {context['savings']}
-"""
-            sections["recommendations"] = self.agent.run(
-                f"Give specific recommendations based on the full context: {full_context}"
-            )
-        except Exception:
-            sections = self._generate_fallback_content(analysis)
-        return sections
+        except Exception as e:
+            logging.error(f"Markdown formatting failed: {e}")
+            markdown_content = generate_fallback_markdown(analysis, raw_analysis)
 
-    def _generate_fallback_content(self, analysis: DebtAnalysisResult) -> Dict[str, str]:
-        return {
-            "executive_summary": (
-                f"Financial analysis for customer {analysis.customer_id} with credit score "
-                f"{analysis.current_credit_score}. There is potential for optimization."
-            ),
-            "payment_analysis": (
-                f"Minimum strategy: {analysis.minimum_payment_strategy.months} months, "
-                f"${analysis.minimum_payment_strategy.total_interest:,.2f} interest. "
-                f"Optimized strategy saves ${analysis.savings_vs_minimum.interest_saved:,.2f} "
-                f"and {analysis.savings_vs_minimum.months_saved} months."
-            ),
-            "consolidation_analysis": (
-                "Consolidation analysis completed." if getattr(analysis, "consolidation_option", None)
-                else "No consolidation options available."
-            ),
-            "savings_analysis": (
-                f"Potential savings of ${analysis.savings_vs_minimum.interest_saved:,.2f} via optimized strategy."
-            ),
-            "recommendations": "Adopt the optimized payment strategy to maximize savings.",
-        }
+        state["markdown_content"] = markdown_content
+        return state
 
-    def _create_pdf_document(self, analysis: DebtAnalysisResult, content: Dict[str, str]) -> bytes:
-        buffer = io.BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=inch, bottomMargin=inch)
+    def _convert_to_styled_html_and_pdf(self, state: ReportState) -> ReportState:
+        """Node 3: Convert markdown to styled HTML and then to PDF."""
+        markdown_content = state["markdown_content"]
+        
+        # Convert markdown to HTML
+        html_content = self._markdown_to_html_with_llm(markdown_content)
 
-        styles = getSampleStyleSheet()
-        title_style = ParagraphStyle('CustomTitle', parent=styles['Heading1'], fontSize=24, spaceAfter=30, alignment=TA_CENTER)
-        heading_style = ParagraphStyle('CustomHeading', parent=styles['Heading2'], fontSize=16, spaceAfter=12, spaceBefore=20)
-        body_style = ParagraphStyle('CustomBody', parent=styles['Normal'], fontSize=11, spaceAfter=12, alignment=TA_JUSTIFY)
+        # Extract the body content from the HTML
+        body_content = extract_html_body_fragment(html_content)
 
-        story = []
-        story.append(Paragraph("Personal Financial Analysis Report", title_style))
-        story.append(Spacer(1, 20))
+        # Add professional styling
+        styled_html = create_styled_html_document(body_content)
+        state["styled_html"] = styled_html
+        
+        # Convert HTML to PDF
+        try:
+            pdf_bytes = html_to_pdf(styled_html)
+            state["pdf_bytes"] = pdf_bytes
+        except Exception as e:
+            logging.error(f"Error converting HTML to PDF: {e}")
+            # Fallback to simple HTML to PDF conversion
+            state["pdf_bytes"] = simple_html_to_pdf(html_content)
+        
+        return state
 
-        header_data = [
-            ["Customer ID:", analysis.customer_id],
-            ["Report Date:", datetime.now().strftime("%B %d, %Y")],
-            ["Credit Score:", str(analysis.current_credit_score)],
-        ]
-        header_table = Table(header_data, colWidths=[2 * inch, 3 * inch])
-        header_table.setStyle(TableStyle([
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 10),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-        ]))
-        story.append(header_table)
-        story.append(Spacer(1, 30))
+    def _markdown_to_html_with_llm(self, markdown_content: str) -> str:
+        """Use LLM (structured output) to convert Markdown to a clean HTML fragment."""
+        prompt = generate_html_conversion_prompt(markdown_content)
+        
+        try:
+            resp = invoke_llm_for_html(self.llm, prompt)
 
-        story.append(Paragraph("Executive Summary", heading_style))
-        story.append(Paragraph(content["executive_summary"], body_style))
+            # Clean any possible code fences or wrappers the model might still sneak in
+            html = strip_code_fences(resp.html)
+            html = remove_html_wrappers(html)
+            html = ensure_table_sections(html)
 
-        story.append(Paragraph("Payment Strategy Analysis", heading_style))
-        story.append(Paragraph(content["payment_analysis"], body_style))
+            # Minimal sanity: ensure we return *some* HTML; else fallback.
+            if not validate_html_fragment(html):
+                raise ValueError("Model returned no HTML tags.")
 
-        financial_data = [
-            ["Strategy", "Duration (Months)", "Total Interest", "Monthly Payment*"],
-            ["Minimum Payment", str(analysis.minimum_payment_strategy.months), f"${analysis.minimum_payment_strategy.total_interest:,.2f}", "Varies"],
-            ["Optimized Payment", str(analysis.optimized_payment_strategy.months), f"${analysis.optimized_payment_strategy.total_interest:,.2f}", "Varies"],
-        ]
-        if getattr(analysis, "consolidation_option", None):
-            financial_data.append([
-                "Consolidation", str(analysis.consolidation_option.months),
-                f"${analysis.consolidation_option.total_interest:,.2f}", "Fixed"
-            ])
+            return html
 
-        financial_table = Table(financial_data, colWidths=[1.5 * inch, 1.2 * inch, 1.5 * inch, 1.3 * inch])
-        financial_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 9),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ]))
-        story.append(financial_table)
-        story.append(Spacer(1, 20))
-
-        story.append(Paragraph("Debt Consolidation Analysis", heading_style))
-        story.append(Paragraph(content["consolidation_analysis"], body_style))
-
-        story.append(Paragraph("Potential Savings Analysis", heading_style))
-        story.append(Paragraph(content["savings_analysis"], body_style))
-
-        if getattr(analysis, "savings_vs_minimum", None):
-            savings_data = [
-                ["Comparison", "Interest Saved", "Time Saved (Months)"],
-                ["Optimized vs Minimum", f"${analysis.savings_vs_minimum.interest_saved:,.2f}", str(analysis.savings_vs_minimum.months_saved)],
-            ]
-            if getattr(analysis, "consolidation_savings", None):
-                savings_data.extend([
-                    ["Consolidation vs Minimum", f"${analysis.consolidation_savings.vs_minimum.interest_saved:,.2f}", str(analysis.consolidation_savings.vs_minimum.months_saved)],
-                    ["Consolidation vs Optimized", f"${analysis.consolidation_savings.vs_optimized.interest_saved:,.2f}", str(analysis.consolidation_savings.vs_optimized.months_saved)],
-                ])
-            savings_table = Table(savings_data, colWidths=[2 * inch, 1.5 * inch, 1.5 * inch])
-            savings_table.setStyle(TableStyle([
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightblue),
-                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, -1), 9),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-                ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ]))
-            story.append(savings_table)
-            story.append(Spacer(1, 20))
-
-        story.append(Paragraph("Personalized Recommendations", heading_style))
-        story.append(Paragraph(content["recommendations"], body_style))
-
-        story.append(Spacer(1, 30))
-        footer_text = "*Monthly payments may vary based on balance and terms. This analysis is for informational purposes only."
-        story.append(Paragraph(footer_text, styles['Normal']))
-
-        doc.build(story)
-        buffer.seek(0)
-        return buffer.getvalue()
+        except Exception as e:
+            logging.error(f"LLM HTML conversion failed: {e}")
+            # Fallback to local Markdown conversion
+            return markdown_to_html_fallback(markdown_content)
 
     def generate_financial_report(self, analysis: DebtAnalysisResult) -> bytes:
-        """Generate a comprehensive PDF financial report using LangChain agents."""
-        content = self._generate_report_content(analysis)
-        return self._create_pdf_document(analysis, content)
+        """
+        Generate a comprehensive PDF financial report using LangGraph workflow.
+        
+        Args:
+            analysis: The debt analysis result data
+            
+        Returns:
+            PDF content as bytes
+        """
+        initial_state = ReportState(
+            analysis_data=analysis,
+            raw_analysis="",
+            markdown_content="",
+            styled_html="",
+            pdf_bytes=b""
+        )
+        
+        # Run the LangGraph workflow
+        final_state = self.graph.invoke(initial_state)
+        
+        return final_state["pdf_bytes"]
 
     def generate_simple_report(self, analysis: DebtAnalysisResult, filename: Optional[str] = None) -> str:
-        """Generate and save a simple PDF report to /tmp and return its path."""
+        """
+        Generate and save a simple PDF report to /tmp and return its path.
+        
+        Args:
+            analysis: The debt analysis result data
+            filename: Optional custom filename
+            
+        Returns:
+            File path where the PDF was saved
+        """
         if not filename:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"financial_report_{analysis.customer_id}_{timestamp}.pdf"
+        
         pdf_bytes = self.generate_financial_report(analysis)
         filepath = f"/tmp/{filename}"
-        with open(filepath, "wb") as f:
-            f.write(pdf_bytes)
+        
+        save_pdf_to_file(pdf_bytes, filepath)
+        
         return filepath
