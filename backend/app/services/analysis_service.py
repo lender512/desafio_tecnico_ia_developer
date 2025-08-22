@@ -69,7 +69,7 @@ class AnalysisService:
         """
         # First, apply basic eligibility checks using pandas logic
         basic_eligible = self._check_basic_eligibility(
-            customer_data, offer, credit_score)
+            customer_data, offer)
         if not basic_eligible:
             return False
 

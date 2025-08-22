@@ -9,6 +9,7 @@ from .credit_score_service import CreditScoreService
 from .cashflow_service import CashflowService
 from .analysis_service import AnalysisService
 from .azure_ai_service import AzureAIService
+from .pdf_report_service import PDFReportService
 
 
 # FastAPI dependency injection functions for each service
@@ -48,3 +49,7 @@ def get_azure_ai_service() -> AzureAIService:
 def get_analysis_service(db: MockDatabase = Depends(get_db), azure_ai_service: AzureAIService = Depends(get_azure_ai_service)) -> AnalysisService:
     """Get analysis service instance via dependency injection"""
     return AnalysisService(db, azure_ai_service)
+
+def get_pdf_report_service() -> PDFReportService:
+    """Get PDF report service instance via dependency injection"""
+    return PDFReportService()
