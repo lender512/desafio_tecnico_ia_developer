@@ -1,16 +1,18 @@
 from fastapi import APIRouter
 from datetime import datetime
 
+from app.schemas import HealthResponse, MessageResponse
+
 router = APIRouter()
 
 
-@router.get("/health")
+@router.get("/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "timestamp": datetime.now()}
+    return HealthResponse(status="healthy", timestamp=datetime.now())
 
 
-@router.get("/")
+@router.get("/", response_model=MessageResponse)
 async def root():
     """Root endpoint"""
-    return {"message": "Welcome to FastAPI Template", "docs": "/docs"}
+    return MessageResponse(message="Welcome to FastAPI Template", docs="/docs")

@@ -1,6 +1,6 @@
 from typing import List
 import os
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -23,9 +23,12 @@ class Settings(BaseSettings):
     PORT: int = 8000
     DEBUG: bool = True
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    # Azure AI Configuration
+    AZURE_INFERENCE_ENDPOINT: str
+    AZURE_INFERENCE_CREDENTIAL: str
+    AZURE_INFERENCE_MODEL: str
+
+    model_config = SettingsConfigDict(env_file=".env")
 
 
 settings = Settings()

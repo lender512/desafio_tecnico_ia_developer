@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core.errors import register_error_handlers
 from app.api.v1.router import api_router
 from app.core.config import settings
 
@@ -15,6 +16,9 @@ def create_application() -> FastAPI:
         version=settings.VERSION,
         openapi_url=f"{settings.API_V1_STR}/openapi.json"
     )
+
+    # Register error handlers
+    register_error_handlers(app)
 
     # Configure CORS
     app.add_middleware(
