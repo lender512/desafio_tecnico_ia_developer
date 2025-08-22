@@ -1,8 +1,5 @@
 FROM python:3.11-slim
 
-# Install curl for health checks
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
-
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
@@ -16,7 +13,9 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-cache
 
 # Copy application code
-COPY app/ ./app/
+COPY app.py ./
+COPY src/ ./src/
+COPY assets/ ./assets/
 
 # Copy environment variables
 COPY .env ./
@@ -27,8 +26,8 @@ RUN useradd --create-home --shell /bin/bash app && \
 USER app
 
 # Expose port (using ARG to allow build-time customization)
-ARG PORT=8000
-EXPOSE $PORT
+ARG STREAMLIT_SERVER_PORT=8501
+EXPOSE $STREAMLIT_SERVER_PORT
 
 # Run the application using uv with environment variables
-CMD ["sh", "-c", "uv run uvicorn app.main:app --host ${HOST:-0.0.0.0} --port ${PORT:-8000}"]
+CMD ["sh", "-c", "uv run streamlit run app.py --server.port=${STREAMLIT_SERVER_PORT:-8501} --server.address=${STREAMLIT_SERVER_ADDRESS:-0.0.0.0} --server.headless=${STREAMLIT_SERVER_HEADLESS:-true} --browser.gatherUsageStats=${STREAMLIT_BROWSER_GATHER_USAGE_STATS:-false}"]

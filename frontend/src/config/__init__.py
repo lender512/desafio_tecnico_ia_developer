@@ -1,0 +1,3 @@
+"""
+Frontend configuration settings
+"""
